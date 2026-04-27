@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>HAND FX</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    font-family: 'Courier New', monospace;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #header {
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #1a1a1a;
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  #header h1 { font-size: 12px; letter-spacing: 4px; color: #ff2d78; }
+  #status { font-size: 10px; color: #333; letter-spacing: 2px; }
+  #status.live { color: #0f0; animation: blink 1s infinite; }
+  #status.detecting { color: #ff2d78; animation: blink 0.5s infinite; }
+  @keyframes blink { 50% { opacity: 0.3; } }
+
+  #canvas-wrap {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+  }
+  canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  #video { display: none; }
+
+  #controls {
+    display: flex;
+    gap: 6px;
+    padding: 8px 10px;
+    border-top: 1px solid #1a1a1a;
+    flex-shrink: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .btn {
+    flex-shrink: 0;
+    padding: 8px 14px;
+    min-height: 44px;
+    background: transparent;
+    border: 1px solid #2a2a2a;
+    color: #555;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.15s;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    border-radius: 4px;
+  }
+  .btn:hover, .btn.active { background: #ff2d78; border-color: #ff2d78; color: #fff; }
+
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    z-index: 20;
+    gap: 20px;
+  }
+  #overlay p { font-size: 11px; color: #333; letter-spacing: 3px; text-align: center; padding: 0 20px; }
+  #start-btn {
+    padding: 14px 36px;
+    background: #ff2d78;
+    border: none;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 3px;
+    cursor: pointer;
+    text-transform: uppercase;
+    border-radius: 4px;
+    touch-action: manipulation;
+  }
+  #loading {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    z-index: 19;
+    gap: 14px;
+  }
+  #loading p { font-size: 10px; color: #ff2d78; letter-spacing: 3px; }
+  .spinner {
+    width: 32px; height: 32px;
+    border: 2px solid #222;
+    border-top-color: #ff2d78;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #hint {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: #333;
+    letter-spacing: 2px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>HAND · FX</h1>
+  <div style="display:flex;gap:10px;align-items:center">
+    <button id="flip-btn" class="btn" style="display:none;padding:6px 10px;min-height:36px">⇄</button>
+    <span id="status">OFFLINE</span>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="c"></canvas>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="overlay">
+    <p>MUESTRA TUS MANOS<br>A LA CÁMARA</p>
+    <button id="start-btn">ACTIVAR</button>
+  </div>
+  <div id="loading">
+    <div class="spinner"></div>
+    <p>CARGANDO IA...</p>
+  </div>
+  <div id="hint">↑ MUESTRA TUS MANOS</div>
+</div>
+
+<div id="controls">
+  <button class="btn active" data-fx="dots">● DOTS</button>
+  <button class="btn" data-fx="particles">✦ PARTÍCULAS</button>
+  <button class="btn" data-fx="glitch">▓ GLITCH</button>
+  <button class="btn" data-fx="lines">◈ LÍNEAS</button>
+  <button class="btn" data-fx="neon">◉ NEÓN</button>
+</div>
+
+<!-- MediaPipe via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const hintEl = document.getElementById('hint');
+const loadingEl = document.getElementById('loading');
+
+let currentFx = 'dots';
+let handResults = null;
+let currentFacing = 'user';
+let currentStream = null;
+let particles = [];
+let frameCount = 0;
+
+// Resize
+function resize() {
+  const wrap = document.getElementById('canvas-wrap');
+  canvas.width = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Buttons
+document.querySelectorAll('.btn[data-fx]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.btn[data-fx]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    currentFx = b.dataset.fx;
+    particles = [];
+  });
+});
+
+// ── MediaPipe setup ──────────────────────────────────────────
+const hands = new Hands({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
+});
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.7,
+  minTrackingConfidence: 0.5
+});
+hands.onResults(results => {
+  handResults = results;
+  const detected = results.multiHandLandmarks && results.multiHandLandmarks.length > 0;
+  statusEl.textContent = detected ? 'DETECTANDO' : 'LIVE';
+  statusEl.className = detected ? 'detecting' : 'live';
+  hintEl.style.opacity = detected ? '0' : '1';
+});
+
+// ── Camera ───────────────────────────────────────────────────
+let mpCamera = null;
+
+async function startCamera(facing) {
+  if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+  if (mpCamera) mpCamera.stop();
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false
+  });
+  video.srcObject = stream;
+  currentStream = stream;
+  await video.play();
+  currentFacing = facing;
+
+  mpCamera = new Camera(video, {
+    onFrame: async () => { await hands.send({ image: video }); },
+    width: 1280, height: 720
+  });
+  mpCamera.start();
+}
+
+document.getElementById('start-btn').addEventListener('click', async () => {
+  document.getElementById('overlay').style.display = 'none';
+  loadingEl.style.display = 'flex';
+  try {
+    await startCamera('user');
+    loadingEl.style.display = 'none';
+    statusEl.textContent = 'LIVE';
+    statusEl.className = 'live';
+    document.getElementById('flip-btn').style.display = 'flex';
+    loop();
+  } catch(e) {
+    loadingEl.style.display = 'none';
+    alert('Error de cámara: ' + e.message);
+    document.getElementById('overlay').style.display = 'flex';
+  }
+});
+
+document.getElementById('flip-btn').addEventListener('click', () => {
+  startCamera(currentFacing === 'user' ? 'environment' : 'user');
+});
+
+// ── Helpers ──────────────────────────────────────────────────
+
+// Obtiene bounding box de la mano en píxeles del canvas
+function getHandBounds(landmarks, W, H, padding = 30) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const lm of landmarks) {
+    // MediaPipe da coordenadas normalizadas (0-1), espejamos X porque la cámara va invertida
+    const x = (1 - lm.x) * W;
+    const y = lm.y * H;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  return {
+    x: minX - padding,
+    y: minY - padding,
+    w: (maxX - minX) + padding * 2,
+    h: (maxY - minY) + padding * 2
+  };
+}
+
+// Punto landmark en px del canvas
+function lmPx(lm, W, H) {
+  return { x: (1 - lm.x) * W, y: lm.y * H };
+}
+
+// Crea máscara convexa de la mano
+function buildHandMask(landmarks, W, H, padding = 20) {
+  // Puntos del contorno de la mano (orden que forma el polígono)
+  const outline = [0,1,2,3,4, 3,2,1,0, 5,6,7,8, 7,6,5, 9,10,11,12, 11,10,9, 13,14,15,16, 15,14,13, 17,18,19,20, 19,18,17, 0];
+  ctx.beginPath();
+  let first = true;
+  for (const i of outline) {
+    const p = lmPx(landmarks[i], W, H);
+    if (first) { ctx.moveTo(p.x, p.y); first = false; }
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+}
+
+// ── Particle system ──────────────────────────────────────────
+function spawnParticles(landmarks, W, H) {
+  // Spawn desde yemas de los dedos (4,8,12,16,20)
+  const tips = [4, 8, 12, 16, 20];
+  for (const i of tips) {
+    if (Math.random() < 0.4) {
+      const p = lmPx(landmarks[i], W, H);
+      const hue = Math.random() * 60 + 300; // magenta/pink/purple
+      particles.push({
+        x: p.x, y: p.y,
+        vx: (Math.random() - 0.5) * 3,
+        vy: -Math.random() * 4 - 1,
+        life: 1,
+        decay: Math.random() * 0.02 + 0.015,
+        size: Math.random() * 5 + 2,
+        hue
+      });
+    }
+  }
+  if (particles.length > 300) particles.splice(0, particles.length - 300);
+}
+
+function drawParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.05; // gravity
+    p.life -= p.decay;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = `hsl(${p.hue}, 100%, 65%)`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ── Main render loop ─────────────────────────────────────────
+function loop() {
+  requestAnimationFrame(loop);
+  frameCount++;
+
+  const W = canvas.width, H = canvas.height;
+  if (video.readyState < 2) return;
+
+  // Dibujar cámara espejada (flip horizontal)
+  ctx.save();
+  ctx.translate(W, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, 0, 0, W, H);
+  ctx.restore();
+
+  if (!handResults || !handResults.multiHandLandmarks) return;
+  const allHands = handResults.multiHandLandmarks;
+  if (allHands.length === 0) return;
+
+  for (const landmarks of allHands) {
+    const bounds = getHandBounds(landmarks, W, H);
+
+    if (currentFx === 'dots') {
+      // ── DOT MATRIX solo dentro de la mano ──
+      ctx.save();
+      buildHandMask(landmarks, W, H, 15);
+      ctx.clip(); // recortar al área de la mano
+
+      const sz = 8;
+      const x0 = Math.max(0, Math.floor(bounds.x));
+      const y0 = Math.max(0, Math.floor(bounds.y));
+      const x1 = Math.min(W, Math.ceil(bounds.x + bounds.w));
+      const y1 = Math.min(H, Math.ceil(bounds.y + bounds.h));
+
+      // Fondo negro en área de mano
+      ctx.fillStyle = '#000';
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+
+      const img = ctx.getImageData(0, 0, W, H);
+      const d = img.data;
+      for (let r = y0; r < y1; r += sz) {
+        for (let c = x0; c < x1; c += sz) {
+          const px = Math.floor(c + sz / 2), py = Math.floor(r + sz / 2);
+          if (px >= W || py >= H) continue;
+          const idx = (py * W + px) * 4;
+          const R = d[idx], G = d[idx+1], B = d[idx+2];
+          const bright = (R + G + B) / 765;
+          const radius = (sz / 2 - 0.5) * Math.max(bright, 0.15);
+          ctx.beginPath();
+          ctx.arc(c + sz/2, r + sz/2, radius, 0, Math.PI * 2);
+          ctx.fillStyle = `rgb(${R},${G},${B})`;
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+
+    } else if (currentFx === 'particles') {
+      // ── PARTÍCULAS desde yemas ──
+      spawnParticles(landmarks, W, H);
+      // Dibujar skeleton de la mano
+      ctx.strokeStyle = 'rgba(255,45,120,0.5)';
+      ctx.lineWidth = 1.5;
+      const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+      for (const [a, b] of connections) {
+        const pa = lmPx(landmarks[a], W, H);
+        const pb = lmPx(landmarks[b], W, H);
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+        ctx.stroke();
+      }
+      drawParticles();
+
+    } else if (currentFx === 'glitch') {
+      // ── GLITCH solo en bounding box de la mano ──
+      ctx.save();
+      buildHandMask(landmarks, W, H, 12);
+      ctx.clip();
+
+      const bx = Math.max(0, Math.floor(bounds.x));
+      const by = Math.max(0, Math.floor(bounds.y));
+      const bw = Math.min(W - bx, Math.ceil(bounds.w));
+      const bh = Math.min(H - by, Math.ceil(bounds.h));
+      if (bw > 0 && bh > 0) {
+        // Color channel shift: dibujar 3 veces con offset y blend
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 0.8;
+        ctx.drawImage(canvas, bx, by, bw, bh, bx + 6, by, bw, bh);
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = '#ff2d78';
+        // Líneas de glitch aleatorias
+        const lc = 6;
+        for (let i = 0; i < lc; i++) {
+          const ly = by + Math.random() * bh;
+          const lh = Math.random() * 8 + 2;
+          const dx = (Math.random() - 0.5) * 30;
+          ctx.drawImage(canvas, bx, ly, bw, lh, bx + dx, ly, bw, lh);
+        }
+        ctx.globalAlpha = 0.06;
+        ctx.fillStyle = '#000';
+        for (let sy = by; sy < by + bh; sy += 3) ctx.fillRect(bx, sy, bw, 1);
+      }
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.restore();
+
+    } else if (currentFx === 'lines') {
+      // ── LÍNEAS entre puntos de la mano ──
+      ctx.save();
+      buildHandMask(landmarks, W, H, 10);
+      ctx.clip();
+
+      // Fondo semitransparente
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(bounds.x, bounds.y, bounds.w, bounds.h);
+
+      // Líneas entre todos los puntos
+      for (let i = 0; i < landmarks.length; i++) {
+        for (let j = i + 1; j < landmarks.length; j++) {
+          const pi = lmPx(landmarks[i], W, H);
+          const pj = lmPx(landmarks[j], W, H);
+          const dx = pi.x - pj.x, dy = pi.y - pj.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist > 120) continue;
+          const alpha = (1 - dist/120) * 0.9;
+          ctx.strokeStyle = `rgba(255,45,120,${alpha})`;
+          ctx.lineWidth = (1 - dist/120) * 2;
+          ctx.beginPath();
+          ctx.moveTo(pi.x, pi.y);
+          ctx.lineTo(pj.x, pj.y);
+          ctx.stroke();
+        }
+      }
+      // Puntos
+      for (const lm of landmarks) {
+        const p = lmPx(lm, W, H);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+      }
+      ctx.restore();
+
+    } else if (currentFx === 'neon') {
+      // ── NEÓN: skeleton brillante sobre la mano ──
+      ctx.save();
+      buildHandMask(landmarks, W, H, 20);
+      ctx.clip();
+
+      // Oscurecer la mano
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fill(); // rellena el path del clip
+
+      const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+      const colors = ['#ff2d78','#00ffaa','#ffdd00','#00cfff','#cc44ff'];
+
+      for (let ci = 0; ci < connections.length; ci++) {
+        const [a, b] = connections[ci];
+        const pa = lmPx(landmarks[a], W, H);
+        const pb = lmPx(landmarks[b], W, H);
+        const col = colors[ci % colors.length];
+        // Glow
+        ctx.shadowColor = col;
+        ctx.shadowBlur = 18;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+
+      // Puntos en knuckles
+      const tips = [4,8,12,16,20,0];
+      for (const i of tips) {
+        const p = lmPx(landmarks[i], W, H);
+        const col = colors[i % colors.length];
+        ctx.shadowColor = col;
+        ctx.shadowBlur = 20;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+      ctx.restore();
+    }
+  }
+}
+</script>
+</body>
+</html>
